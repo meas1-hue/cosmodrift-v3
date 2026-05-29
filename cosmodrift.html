@@ -655,6 +655,22 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   }
 
   // ==================== PLANETS ====================
+  // Generate a pixel-art planet sphere
+  function createPixelPlanet(radius, colors) {
+    var pixels = [];
+    var blockSize = 4;
+    var r = radius * blockSize;
+    for (var py = -r; py <= r; py += blockSize) {
+      for (var px = -r; px <= r; px += blockSize) {
+        var dist = Math.sqrt(px * px + py * py);
+        if (dist <= r) {
+          var ci = Math.min(colors.length - 1, Math.floor((dist / r) * colors.length));
+          pixels.push({ px: px, py: py, color: colors[ci] });
+        }
+      }
+    }
+    return { pixels: pixels, blockSize: blockSize, radius: radius };
+  }
   // City silhouette generator for planet surface decoration
   function generateCitySilhouette(seed, width, maxH) {
     var buildings = [];
