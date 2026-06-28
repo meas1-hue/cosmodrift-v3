@@ -1402,7 +1402,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   }
 
   function checkPlanetCollisions() {
-    if (charInvincible > 0) { charInvincible -= 0.016; return; }
+    if (charInvincible > 0) { return; }
     if (char.state === 'death') return;
     const cx = CHAR_X, cy = char.y;
     const cw = char.isSliding ? char.hitW * 1.5 : char.hitW;
@@ -1411,19 +1411,20 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       const ox = o.x + o.w * 0.5, oy = o.y + o.h * 0.5;
       const hw = (cw * 0.8 * 0.5) + (o.w * 0.75 * 0.5);
       const hh = (ch * 0.8 * 0.5) + (o.h * 0.75 * 0.5);
-      if (Math.abs(cx - ox) < hw && Math.abs(cy - ch / 2 - oy + o.h / 2) < hh) {
+      if (Math.abs(cx - ox) < hw && Math.abs(cy - ch / 2 - oy) < hh) {
         if (o.slideUnder && char.isSliding) continue;
         takeDamagePlanet();
         return;
       }
     }
-    for (const b of laserBeams) {
+    for (let bi = laserBeams.length - 1; bi >= 0; bi--) {
+      const b = laserBeams[bi];
       for (let i = planetEnemies.length - 1; i >= 0; i--) {
         const e = planetEnemies[i];
         if (!e.alive) continue;
         if (b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h) {
           e.hp--;
-          laserBeams.splice(laserBeams.indexOf(b), 1);
+          laserBeams.splice(bi, 1);
           if (e.hp <= 0) { e.alive = false; score += 5; spawnEnemyExplosion(e.x + e.w / 2, e.y + e.h / 2); }
           break;
         }
@@ -2032,7 +2033,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       char.tapTimer -= dt;
       if (char.tapTimer <= 0 && char.tapCount > 0 && char.shootReadyTimer <= 0) {
         char.tapCount = 0;
-        setCharState(char.onGround ? 'run' : 'jump');
+        if (char.state !== 'death') setCharState(char.onGround ? 'run' : 'jump');
       }
     }
     if (char.shootReadyTimer > 0) char.shootReadyTimer -= dt;
@@ -2585,8 +2586,6 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       updateCharacter(dt);
       updatePlanetObstacles(dt);
       updateLaserBeams(dt);
-      updateParticles(dt);
-      updateExplosionParticles(dt);
       checkPlanetCollisions();
       if (charInvincible > 0) charInvincible -= dt;
     }
