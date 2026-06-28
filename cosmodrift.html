@@ -217,7 +217,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // Scroll speed
   const DRIFT_BASE_SPEED = 105;
   const DRIFT_MAX_SPEED = 180;
-  const SPACE_RUNNER_DURATION = 60; // seconds before crash trigger
+  const SPACE_RUNNER_DURATION = 20; // seconds before crash trigger
 
   // Lives
   const MAX_LIVES = 3;
@@ -2806,7 +2806,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // ==================== PHASE TRANSITION ====================
   function updateStageTransition(dt) {
     stageTimer += dt;
-    // Check if 60s has elapsed — trigger crash sequence
+    // Check if the space-runner duration has elapsed — trigger crash sequence
     if (stage === STAGE.SPACE_RUNNER && stageTimer >= SPACE_RUNNER_DURATION && !crashStarted) {
       startCrash();
     }
