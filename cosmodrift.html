@@ -26,7 +26,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   const STATE = { MENU: 'MENU', PLAYING: 'PLAYING', GAME_OVER: 'GAME_OVER' };
 
   // Stage machine — replaces old PHASE system
-  const STAGE = { SPACE_RUNNER: 'SPACE_RUNNER', CRASH_CINEMATIC: 'CRASH_CINEMATIC', PLANET_RUNNER: 'PLANET_RUNNER' };
+  const STAGE = { SPACE_RUNNER: 'SPACE_RUNNER', CRASH_CINEMATIC: 'CRASH_CINEMATIC', LANDING: 'LANDING', PLANET_RUNNER: 'PLANET_RUNNER' };
 
   // Ship — runner style, rests near bottom
   const SHIP_X = 90;
@@ -131,17 +131,37 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     var qi = 0;
     while (qi < queue.length) {
       var idx = queue[qi++];
-      d[idx*4+3] = 0;
       for (var n = 0; n < nbrs.length; n++) {
         var ni = idx + nbrs[n];
         if (ni < 0 || ni >= w*h || visited[ni]) continue;
-        if (isBg(ni) || colorDist(idx, ni) < 90) {
+        // Only flood through actual background pixels, OR pixels that are a
+        // close color match to a *background* neighbour (anti-aliased edge).
+        // Chaining the color-distance test through ANY pixel let the fill walk
+        // across smooth photographic gradients and erase the whole subject.
+        if (isBg(ni) || (isBg(idx) && colorDist(idx, ni) < 60)) {
           visited[ni] = 1;
           queue.push(ni);
         }
       }
     }
 
+    // Safety guard: if the fill ever "walks" across the subject and erases
+    // almost the ENTIRE image, the character would vanish (transparent canvas).
+    // These sprites are small figures on large studio backdrops, so legitimate
+    // background removal is ~85-92%; only a runaway fill approaches ~100%.
+    // Revert to the raw image in that case so the character is always visible.
+    var removed = queue.length;
+    if (removed > 0.97 * w * h) {
+      var raw = document.createElement('canvas');
+      raw.width = w; raw.height = h;
+      raw.getContext('2d').drawImage(img, 0, 0);
+      return raw;
+    }
+
+    // Apply the background removal
+    for (var qj = 0; qj < queue.length; qj++) {
+      d[queue[qj]*4+3] = 0;
+    }
     tx.putImageData(id, 0, 0);
     return tc;
   }
@@ -197,7 +217,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // Scroll speed
   const DRIFT_BASE_SPEED = 105;
   const DRIFT_MAX_SPEED = 180;
-  const SPACE_RUNNER_DURATION = 60; // seconds before crash trigger
+  const SPACE_RUNNER_DURATION = 20; // seconds before crash trigger
 
   // Lives
   const MAX_LIVES = 3;
@@ -313,6 +333,16 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   let crashFlash = 0;
   let crashMissile = null;
   let crashStarted = false;
+
+  // Landing cinematic state (bridges crash -> planet runner)
+  let landingTime = 0;
+  const LANDING_DURATION = 5.0;
+  let landingPlanetScale = 0;   // planet surface grows from 0->1
+  let landingShipY = -100;      // ship descends from top
+  let landingShipAngle = 0;
+  let landingSmoke = [];
+  let landingDustParticles = [];
+  let landingCameraShake = 0;
 
   // Planet runner state
 
@@ -1649,18 +1679,25 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     nextCreatureTimer = 5 + Math.random() * 8;
   }
 
+  // Standalone sky — shared by the landing cinematic and the planet runner
+  function drawJungleSky() {
+    // Rich layered sky
+    const sg = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+    sg.addColorStop(0,    '#0a1a2a');  // deep space blue-black at top
+    sg.addColorStop(0.25, '#1a3a4a');  // dark teal
+    sg.addColorStop(0.55, '#2a6a3a');  // jungle green mid
+    sg.addColorStop(0.8,  '#6a9a2a');  // warm yellow-green
+    sg.addColorStop(1,    '#9acc44');  // bright horizon
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, 0, W, H * 0.7);
+  }
+
   function drawJungle(dt, time) {
     jungleScroll += 80 * dt;
     const t2 = time;
 
-    // 1. Sky gradient — warm teal-to-amber
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.65);
-    skyGrad.addColorStop(0,   '#1a4a5a');
-    skyGrad.addColorStop(0.4, '#2a6a4a');
-    skyGrad.addColorStop(0.8, '#8aaa44');
-    skyGrad.addColorStop(1,   '#aacc66');
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, W, H * 0.65);
+    // 1. Sky
+    drawJungleSky();
 
     // Two small alien suns
     const sun1x = ((W * 0.7 - jungleScroll * 0.01) % (W + 100) + W + 100) % (W + 100) - 50;
@@ -1671,8 +1708,14 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     // 2. Far mountains (0.15x parallax)
     drawJungleMountains(jungleScroll * 0.15);
 
+    // 2b. Giant alien trees — deep background (0.2x), darker and slower
+    drawJungleDeepBackground(jungleScroll * 0.2);
+
     // 3. Mid trees + alien structures (0.4x)
     drawJungleMidLayer(jungleScroll * 0.4, t2);
+
+    // 3b. Atmospheric haze / rising mist
+    drawJungleHaze(jungleScroll);
 
     // 4. Foreground foliage (0.85x)
     drawJungleForeground(jungleScroll * 0.85, t2);
@@ -1680,8 +1723,96 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     // 5. Ground band
     drawJungleGround();
 
+    // 5b. Bioluminescent mushrooms + spore mist
+    drawBioGlow(jungleScroll * 1.1);
+
     // Atmospheric creatures
     updateAndDrawJungleCreatures(dt, t2);
+  }
+
+  // Atmospheric haze layers — mist rising from the jungle floor
+  function drawJungleHaze(scrollX) {
+    const hazeColors = [
+      'rgba(80,180,100,0.08)',
+      'rgba(120,200,80,0.06)',
+      'rgba(180,220,100,0.05)'
+    ];
+    for (let i = 0; i < 3; i++) {
+      const baseY = H * (0.45 + i * 0.08);
+      const waveOffset = Math.sin(time * 0.3 + i * 2.1) * 8;
+      ctx.fillStyle = hazeColors[i];
+      ctx.beginPath();
+      ctx.moveTo(0, baseY);
+      for (let x = 0; x <= W; x += 20) {
+        const y = baseY + Math.sin(x * 0.02 + scrollX * 0.001 + i) * 12 + waveOffset;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H); ctx.lineTo(0, H);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  // Bioluminescent ground effects — glowing mushrooms + spore mist
+  function drawBioGlow(scrollX) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    const gy = CHAR_GROUND_Y;
+
+    // Glowing mushroom clusters
+    for (let i = 0; i < 6; i++) {
+      const mx = ((i * 160 + 30 - scrollX * 1.1) % (W + 100) + W + 100) % (W + 100) - 50;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 2.5 + i * 1.3);
+      const colors = ['#88ffcc', '#ffaa44', '#aa88ff', '#44ffff'];
+      const col = colors[i % colors.length];
+
+      // Cap
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.7 + 0.3 * pulse;
+      ctx.fillRect(Math.round(mx) - 8, gy - 20, 16, 10);
+      ctx.fillRect(Math.round(mx) - 5, gy - 10, 10, 10);
+      // Glow underneath
+      ctx.globalAlpha = 0.3 * pulse;
+      ctx.fillStyle = col;
+      for (let r = 1; r <= 3; r++) {
+        ctx.fillRect(Math.round(mx) - 8 - r * 2, gy - 20 - r, 16 + r * 4, 10 + r * 2);
+      }
+    }
+
+    // Ground-level spore mist — fast small particles
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < 12; i++) {
+      const px = ((i * 55 + time * 15) % W + W) % W;
+      const py = gy - 5 - Math.sin(time * 1.5 + i) * 8;
+      const sa = 0.15 + 0.1 * Math.sin(time * 3 + i * 2);
+      ctx.fillStyle = `rgba(150,255,120,${sa})`;
+      ctx.fillRect(Math.round(px), Math.round(py), 2, 2);
+    }
+
+    ctx.restore();
+  }
+
+  // Giant alien trees far in the background — dark, slow, majestic
+  function drawJungleDeepBackground(scrollX) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    for (let i = 0; i < 6; i++) {
+      const tx = ((i * 200 + 50 - scrollX) % (W + 300) + W + 300) % (W + 300) - 150;
+      const th = 200 + i * 30;
+      // Massive trunk
+      ctx.fillStyle = 'rgba(15,35,20,0.85)';
+      ctx.fillRect(Math.round(tx) - 15, CHAR_GROUND_Y - th, 30, th);
+      // Canopy — huge dark mass
+      ctx.fillStyle = 'rgba(20,50,25,0.8)';
+      ctx.beginPath();
+      ctx.arc(tx, CHAR_GROUND_Y - th, 70 + i * 10, 0, Math.PI * 2);
+      ctx.fill();
+      // Bioluminescent patches on the canopy
+      const gp = 0.3 + 0.2 * Math.sin(time * 0.8 + i);
+      ctx.fillStyle = `rgba(60,200,80,${gp})`;
+      ctx.fillRect(Math.round(tx) - 10, CHAR_GROUND_Y - th - 20, 20, 15);
+      ctx.fillRect(Math.round(tx) + 20, CHAR_GROUND_Y - th + 10, 15, 10);
+    }
+    ctx.restore();
   }
 
   function drawPixelSun(cx, cy, r, colorOuter, colorInner) {
@@ -2051,12 +2182,25 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   }
 
   function drawCharacter() {
-    if (!spritesLoaded) return;
+    // Guard 1: sprites must be loaded — draw a placeholder so she's always visible
+    if (!spritesLoaded) {
+      ctx.fillStyle = '#ff00ff';
+      ctx.fillRect(CHAR_X - 20, char.y - 60, 40, 60);
+      return;
+    }
+
     const anim = CHAR_ANIMS[char.state];
     if (!anim) return;
-    const frameName = anim.frames[Math.min(char.animFrame, anim.frames.length-1)];
-    const sp = sprites[frameName];
-    if (!sp) return;
+    const frameName = anim.frames[Math.min(char.animFrame, anim.frames.length - 1)];
+
+    // Guard 2: resolve the sprite, falling back to idle/run1 if the frame is missing
+    const sp = sprites[frameName] || sprites['idle'] || sprites['run1'];
+    if (!sp) {
+      // Last-resort fallback so the player can still see the character
+      ctx.fillStyle = '#ff8800';
+      ctx.fillRect(CHAR_X - 20, char.y - 60, 40, 60);
+      return;
+    }
 
     const aspect = sp.height / sp.width;
     const dh = CHAR_DISPLAY_H;
@@ -2494,26 +2638,193 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     crashFlash *= 0.85;
     for (let i = crashSmoke.length-1; i>=0; i--){ const s=crashSmoke[i]; s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt; if(s.life<=0)crashSmoke.splice(i,1); }
     for (let i = crashSparks.length-1; i>=0; i--){ const s=crashSparks[i]; s.x+=s.vx*dt; s.y+=s.vy*dt; s.vy+=300*dt; s.life-=dt; if(s.life<=0)crashSparks.splice(i,1); }
-    // End → transition to planet runner
+    // End of crash → start landing cinematic
     if (crashTime >= CRASH_DURATION) {
       crashStarted = false;
+      stage = STAGE.LANDING;
+      landingTime = 0;
+      landingShipY = -80;
+      landingShipAngle = 0.3;
+      landingPlanetScale = 0;
+      landingSmoke = [];
+      landingDustParticles = [];
+      landingCameraShake = 0;
+      // Jungle is initialized now so the landing scene can render it
+      initJungle();
+    }
+  }
+
+  function easeInOut(t) {
+    return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+  }
+
+  function updateLanding(dt) {
+    landingTime += dt;
+
+    // Ship descent path
+    if (landingTime < LANDING_DURATION * 0.7) {
+      const descP = landingTime / (LANDING_DURATION * 0.7);
+      landingShipY = -80 + (CHAR_GROUND_Y - 60 - (-80)) * easeInOut(descP);
+      landingShipAngle = 0.3 * (1 - descP); // straightens out
+      // Continuous smoke during descent
+      if (Math.random() < 0.7) {
+        landingSmoke.push({
+          x: W / 2 + (Math.random() - 0.5) * 20,
+          y: landingShipY - 10,
+          vx: (Math.random() - 0.5) * 30,
+          vy: -15 - Math.random() * 20,
+          life: 1.0, max: 1.0,
+          r: 4 + Math.random() * 6
+        });
+      }
+    } else if (landingTime < LANDING_DURATION * 0.75) {
+      // Impact moment
+      landingShipY = CHAR_GROUND_Y - 55;
+      landingShipAngle = 0;
+      if (landingCameraShake < 0.1) {
+        landingCameraShake = 14;
+        // Dust burst
+        for (let i = 0; i < 30; i++) {
+          const a = Math.PI + Math.random() * Math.PI;
+          const s = 60 + Math.random() * 120;
+          landingDustParticles.push({
+            x: W / 2, y: CHAR_GROUND_Y,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40,
+            life: 1.2, max: 1.2
+          });
+        }
+        if (typeof playSound === 'function') { try { playSound('explosion'); } catch (e) {} }
+      }
+    } else {
+      landingShipY = CHAR_GROUND_Y - 55;
+      landingShipAngle = 0;
+    }
+
+    landingCameraShake *= 0.88;
+
+    // Update smoke
+    for (let i = landingSmoke.length - 1; i >= 0; i--) {
+      const s = landingSmoke[i];
+      s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+      if (s.life <= 0) landingSmoke.splice(i, 1);
+    }
+    // Update dust
+    for (let i = landingDustParticles.length - 1; i >= 0; i--) {
+      const d = landingDustParticles[i];
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      d.vy += 180 * dt; d.life -= dt;
+      if (d.life <= 0) landingDustParticles.splice(i, 1);
+    }
+
+    // End landing → start planet runner
+    if (landingTime >= LANDING_DURATION) {
       stage = STAGE.PLANET_RUNNER;
       initJungle();
       initPlanetRunner();
       char.y = CHAR_GROUND_Y;
-      char.vy = 0;
-      char.onGround = true;
-      char.jumpsUsed = 0;
-      char.isSliding = false;
-      charInvincible = 0;
-      setCharState('idle');
-      // Brief pause then start playing
-      setTimeout(() => {
-        if (stage === STAGE.PLANET_RUNNER && gameState === STATE.PLAYING) {
-          setCharState('run');
-        }
-      }, 500);
+      char.vy = 0; char.onGround = true;
+      char.jumpsUsed = 0; char.isSliding = false;
+      charInvincible = 2.0;
+      setCharState('run');
     }
+  }
+
+  function renderLanding() {
+    ctx.save();
+    const sx = (Math.random() - 0.5) * landingCameraShake;
+    const sy = (Math.random() - 0.5) * landingCameraShake;
+    ctx.translate(sx, sy);
+
+    // Jungle sky + far mountains as backdrop
+    drawJungleSky();
+    drawJungleMountains(landingTime * 20);
+
+    // Planet surface rises from bottom as ship descends
+    const surfaceP = Math.min(1, landingTime / (LANDING_DURATION * 0.5));
+    const surfaceY = H - (H * 0.35 * surfaceP);
+    const surfGrad = ctx.createLinearGradient(0, surfaceY, 0, H);
+    surfGrad.addColorStop(0, '#3a7a2a');
+    surfGrad.addColorStop(0.3, '#2a5a1a');
+    surfGrad.addColorStop(1, '#1a3a0a');
+    ctx.fillStyle = surfGrad;
+    ctx.fillRect(0, surfaceY, W, H - surfaceY);
+
+    // Ground texture on surface
+    if (surfaceP > 0.3) {
+      ctx.imageSmoothingEnabled = false;
+      for (let x = 0; x < W; x += 6) {
+        const sh = 30 + Math.floor(Math.sin(x * 0.3 + landingTime) * 8);
+        ctx.fillStyle = `rgb(${30 + sh % 10},${sh + 30},${15 + sh % 5})`;
+        ctx.fillRect(x, Math.round(surfaceY), 5, 4);
+      }
+    }
+
+    // Tree silhouettes appearing as surface rises
+    if (surfaceP > 0.5) {
+      ctx.fillStyle = 'rgba(20,50,15,0.8)';
+      for (let i = 0; i < 8; i++) {
+        const tx = (i * 70 + 20) % W;
+        const th = 40 + Math.sin(i * 2.3) * 20;
+        ctx.fillRect(tx - 8, surfaceY - th, 16, th);
+        ctx.fillRect(tx - 20, surfaceY - th * 0.6, 40, th * 0.5);
+      }
+    }
+
+    // Speed lines in upper area (falling sensation)
+    if (landingTime < LANDING_DURATION * 0.7) {
+      ctx.strokeStyle = 'rgba(200,220,255,0.2)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 12; i++) {
+        const lx = (i * 45 + landingTime * 80) % W;
+        const len = 20 + Math.random() * 40;
+        ctx.beginPath();
+        ctx.moveTo(lx, 0);
+        ctx.lineTo(lx + 5, len);
+        ctx.stroke();
+      }
+    }
+
+    // Smoke particles
+    ctx.imageSmoothingEnabled = false;
+    for (const s of landingSmoke) {
+      const a = s.life / s.max;
+      ctx.fillStyle = `rgba(80,80,90,${a * 0.6})`;
+      ctx.fillRect(Math.round(s.x - s.r), Math.round(s.y - s.r), s.r * 2, s.r * 2);
+    }
+
+    // The ship — drawn large (she was inside it)
+    const shipScale = 2.2;
+    ctx.save();
+    ctx.translate(Math.round(W / 2), Math.round(landingShipY));
+    ctx.rotate(landingShipAngle);
+    ctx.scale(shipScale, shipScale);
+    drawShip(0, 0, 0, 1, false);
+    ctx.restore();
+
+    // Dust particles after landing
+    for (const d of landingDustParticles) {
+      const a = d.life / d.max;
+      ctx.fillStyle = `rgba(180,160,100,${a * 0.7})`;
+      ctx.fillRect(Math.round(d.x), Math.round(d.y), 3, 3);
+    }
+
+    // "PLANET: VERDANT" title fading in during last ~1.5s
+    const titleP = Math.max(0, (landingTime - LANDING_DURATION * 0.7) / (LANDING_DURATION * 0.3));
+    if (titleP > 0) {
+      ctx.globalAlpha = Math.min(1, titleP * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, H / 2 - 30, W, 50);
+      ctx.fillStyle = '#88ffaa';
+      ctx.font = 'bold 18px Orbitron, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('PLANET: VERDANT', W / 2, H / 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = '11px Orbitron, monospace';
+      ctx.fillText('PREPARE FOR COMBAT', W / 2, H / 2 + 20);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
   }
 
   function renderCrash() {
@@ -2593,7 +2904,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // ==================== PHASE TRANSITION ====================
   function updateStageTransition(dt) {
     stageTimer += dt;
-    // Check if 60s has elapsed — trigger crash sequence
+    // Check if the space-runner duration has elapsed — trigger crash sequence
     if (stage === STAGE.SPACE_RUNNER && stageTimer >= SPACE_RUNNER_DURATION && !crashStarted) {
       startCrash();
     }
@@ -2678,6 +2989,10 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       updateStageTransition(dt);
       return;
     }
+    if (stage === STAGE.LANDING) {
+      updateLanding(dt);
+      return;
+    }
     if (stage === STAGE.SPACE_RUNNER) {
       updateDrift(dt);
     } else if (stage === STAGE.PLANET_RUNNER) {
@@ -2708,6 +3023,8 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
         renderCrash();
       } else if (transitioning && transitionPhase === 'CRASH_CINEMATIC') {
         // Transition active — freeze frame
+      } else if (stage === STAGE.LANDING) {
+        renderLanding();
       } else if (stage === STAGE.PLANET_RUNNER) {
         drawJungle(dt, time);
         drawPlanetObstacles(time);
