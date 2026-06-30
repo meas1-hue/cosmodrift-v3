@@ -26,7 +26,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   const STATE = { MENU: 'MENU', PLAYING: 'PLAYING', GAME_OVER: 'GAME_OVER' };
 
   // Stage machine — replaces old PHASE system
-  const STAGE = { SPACE_RUNNER: 'SPACE_RUNNER', CRASH_CINEMATIC: 'CRASH_CINEMATIC', PLANET_RUNNER: 'PLANET_RUNNER' };
+  const STAGE = { SPACE_RUNNER: 'SPACE_RUNNER', CRASH_CINEMATIC: 'CRASH_CINEMATIC', LANDING: 'LANDING', PLANET_RUNNER: 'PLANET_RUNNER' };
 
   // Ship — runner style, rests near bottom
   const SHIP_X = 90;
@@ -65,25 +65,24 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   var SHIP_GRID_H = SHIP_PIXELS.length;    // 14
 
   // ==================== SPRITE LOADING SYSTEM ====================
-  // Sprite file mapping — each state has 2 frames (idle/run/roll have alternates)
-  // run_alt has a black background (handled separately)
+  // Sprite frames. NOTE: the source filenames do NOT describe their pose — the
+  // set was delivered mislabelled. Each key below is loaded by the pose it
+  // ACTUALLY depicts (verified by eye), which is what the animation table uses.
+  // Only the frames whose backgrounds key out cleanly are included; the rest of
+  // the delivered files sit on an un-keyable studio gradient and are unused.
+  //   hurt.jpg   -> standing idle           run2.jpg  -> running stride
+  //   roll2.jpg  -> running stride          roll1.jpg -> aerial leap (faces left)
+  //   run_alt.jpg-> dash burst (black bg)   death.jpg -> low crouch
+  //   slide.jpg  -> braced gunfire          aim.jpg   -> lunging gunfire w/ flash
   var SPRITE_FILES = {
-    idle:    { file: 'idle.jpg',    blackBg: false },
-    idle2:   { file: 'idle2.jpg',   blackBg: false },
-    run1:    { file: 'run1.jpg',    blackBg: false },
-    run2:    { file: 'run2.jpg',    blackBg: false },
-    run3:    { file: 'run3.jpg',    blackBg: false },
-    run4:    { file: 'run4.jpg',    blackBg: false },
-    run_alt: { file: 'run_alt.jpg', blackBg: true  },  // black background
-    jump:    { file: 'jump.jpg',    blackBg: false },
-    roll1:   { file: 'roll1.jpg',   blackBg: false },
-    roll2:   { file: 'roll2.jpg',   blackBg: false, flip: true }, // faces LEFT — flip
-    land:    { file: 'land.jpg',    blackBg: false },
-    slide:   { file: 'slide.jpg',   blackBg: false },
-    aim:     { file: 'aim.jpg',     blackBg: false },
-    fire:    { file: 'fire.jpg',    blackBg: false },
-    hurt:    { file: 'hurt.jpg',    blackBg: false },
-    death:   { file: 'death.jpg',   blackBg: false }
+    hurt:    { file: 'hurt.jpg' },                 // standing idle (faces right)
+    run2:    { file: 'run2.jpg' },                 // run stride A (faces right)
+    roll2:   { file: 'roll2.jpg' },                // run stride B (faces right)
+    roll1:   { file: 'roll1.jpg', flip: true },    // aerial leap — flip to travel direction
+    run_alt: { file: 'run_alt.jpg', blackBg: true},// dash burst, black background
+    death:   { file: 'death.jpg' },                // low crouch (faces right)
+    slide:   { file: 'slide.jpg' },                // braced gunfire (faces right)
+    aim:     { file: 'aim.jpg' }                   // lunging gunfire w/ muzzle flash
   };
 
   // Loaded sprite canvases: spriteCanvases[name] = canvas
@@ -91,30 +90,35 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   var spritesLoaded = false;
   var spritesError = false;
 
-  // Flood-fill background removal: removes gray checkerboard from sprite images
-  // The checkerboard is ~204,204,204 and ~153,153,153 alternating pixels
+  // Background removal. The sprite frames sit on a light grey "transparency"
+  // checkerboard (two near-grey shades, lightened further by JPEG compression)
+  // or, for the black-bg frame, a near-black field. We flood-fill inward from
+  // the four edges, treating any low-saturation / bright pixel as background.
+  // Because the predicate is generous, the fill sweeps the entire connected
+  // backdrop in one pass instead of getting trapped on JPEG noise at the
+  // checker-square boundaries (the bug that left the old key removing almost
+  // nothing). Flooding from the edges also means interior grey pixels — the
+  // gun's metal, muzzle-flash cores — are enclosed by the character and so are
+  // never reached, which preserves them.
   function floodFillRemoveBg(img, isBlackBg) {
     var tc = document.createElement('canvas');
     tc.width = img.naturalWidth || img.width;
     tc.height = img.naturalHeight || img.height;
     var tx = tc.getContext('2d');
     tx.drawImage(img, 0, 0);
-    var id = tx.getImageData(0, 0, tc.width, tc.height);
-    var d = id.data;
-    var w = tc.width, h = tc.height;
-    var visited = new Uint8Array(w * h);
+    var id, d;
+    try { id = tx.getImageData(0, 0, tc.width, tc.height); d = id.data; }
+    catch (e) { return tc; }
+    var w = tc.width, h = tc.height, n = w * h;
+    var visited = new Uint8Array(n);
 
-    // For black bg: key on dark pixels; for checker bg: key on gray
     function isBg(idx) {
       var r = d[idx*4], g = d[idx*4+1], b = d[idx*4+2];
-      if (isBlackBg) return r < 30 && g < 30 && b < 30;
-      // Checker bg: two gray shades ~(204,204,204) and ~(153,153,153)
-      var gray = Math.abs(r - g) < 20 && Math.abs(g - b) < 20 && Math.abs(r - b) < 20;
-      return gray && r > 100 && r < 230;
-    }
-
-    function colorDist(a, b2) {
-      return Math.abs(d[a*4]-d[b2*4]) + Math.abs(d[a*4+1]-d[b2*4+1]) + Math.abs(d[a*4+2]-d[b2*4+2]);
+      if (isBlackBg) return r < 45 && g < 45 && b < 45;
+      // Checker bg: low colour saturation and not dark. Catches both grey
+      // shades and the JPEG transitions between them.
+      var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      return (mx - mn) < 40 && (r + g + b) > 430;
     }
 
     var queue = [];
@@ -122,8 +126,6 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       var idx = y * w + x;
       if (!visited[idx] && isBg(idx)) { visited[idx] = 1; queue.push(idx); }
     }
-
-    // Seed from all 4 edges
     for (var x = 0; x < w; x++) { seed(x, 0); seed(x, h-1); }
     for (var y = 0; y < h; y++) { seed(0, y); seed(w-1, y); }
 
@@ -131,17 +133,25 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     var qi = 0;
     while (qi < queue.length) {
       var idx = queue[qi++];
-      d[idx*4+3] = 0;
-      for (var n = 0; n < nbrs.length; n++) {
-        var ni = idx + nbrs[n];
-        if (ni < 0 || ni >= w*h || visited[ni]) continue;
-        if (isBg(ni) || colorDist(idx, ni) < 90) {
-          visited[ni] = 1;
-          queue.push(ni);
-        }
+      for (var k = 0; k < 4; k++) {
+        var ni = idx + nbrs[k];
+        if (ni < 0 || ni >= n || visited[ni]) continue;
+        // Don't let horizontal steps wrap across rows.
+        if ((nbrs[k] === -1 && idx % w === 0) || (nbrs[k] === 1 && idx % w === w-1)) continue;
+        if (isBg(ni)) { visited[ni] = 1; queue.push(ni); }
       }
     }
 
+    // Safety guard: if we somehow erased almost the whole frame, revert to the
+    // raw image so the character is never invisible.
+    if (queue.length > 0.985 * n) {
+      var raw = document.createElement('canvas');
+      raw.width = w; raw.height = h;
+      raw.getContext('2d').drawImage(img, 0, 0);
+      return raw;
+    }
+
+    for (var qj = 0; qj < queue.length; qj++) d[queue[qj]*4+3] = 0;
     tx.putImageData(id, 0, 0);
     return tc;
   }
@@ -156,6 +166,44 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     return tc;
   }
 
+  // Crop a (flood-filled) canvas down to the bounding box of its opaque pixels.
+  // The source frames place a small figure on a large studio backdrop; once the
+  // backdrop is transparent the figure can sit anywhere in the frame with wide,
+  // pose-dependent margins. Drawing the whole frame therefore makes the
+  // character float above the ground and appear at an inconsistent scale.
+  // Cropping to the opaque content gives every pose a tight box whose bottom
+  // edge is the character's feet, so the renderer can anchor and size her
+  // predictably.
+  function cropToContent(canvas) {
+    var w = canvas.width, h = canvas.height;
+    if (!w || !h) return canvas;
+    var cx = canvas.getContext('2d');
+    var data;
+    try { data = cx.getImageData(0, 0, w, h).data; }
+    catch (e) { return canvas; }
+    var minX = w, minY = h, maxX = -1, maxY = -1;
+    var ALPHA = 24; // ignore near-transparent anti-aliased fringe
+    for (var y = 0; y < h; y++) {
+      var row = y * w;
+      for (var x = 0; x < w; x++) {
+        if (data[(row + x) * 4 + 3] > ALPHA) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    // Fully transparent or already tight — nothing to crop.
+    if (maxX < minX || maxY < minY) return canvas;
+    var cw = maxX - minX + 1, ch = maxY - minY + 1;
+    if (cw >= w && ch >= h) return canvas;
+    var out = document.createElement('canvas');
+    out.width = cw; out.height = ch;
+    out.getContext('2d').drawImage(canvas, minX, minY, cw, ch, 0, 0, cw, ch);
+    return out;
+  }
+
   // Load all sprites and store as canvases
   function loadAllSprites() {
     var keys = Object.keys(SPRITE_FILES);
@@ -168,6 +216,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       img.onload = function() {
         try {
           var canvas = floodFillRemoveBg(img, cfg.blackBg);
+          canvas = cropToContent(canvas);
           if (cfg.flip) canvas = flipCanvasHorizontal(canvas);
           sprites[name] = canvas;
         } catch(e) {
@@ -197,7 +246,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // Scroll speed
   const DRIFT_BASE_SPEED = 105;
   const DRIFT_MAX_SPEED = 180;
-  const SPACE_RUNNER_DURATION = 60; // seconds before crash trigger
+  const SPACE_RUNNER_DURATION = 20; // seconds before crash trigger
 
   // Lives
   const MAX_LIVES = 3;
@@ -266,19 +315,31 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   };
   let charInvincible = 0;
 
+  // Animation table. Frame names refer to SPRITE_FILES keys (loaded by the pose
+  // they actually show). The character always travels to the right, so every
+  // pose faces right.
   const CHAR_ANIMS = {
-    idle:     { frames: ['idle','idle2'],       fps: 2,  loop: true  },
-    run:      { frames: ['run1','run2','run3','run4'], fps: 10, loop: true  },
-    run_alt:  { frames: ['run_alt'],             fps: 10, loop: true  },
-    jump:     { frames: ['jump'],                fps: 1,  loop: false },
-    roll:     { frames: ['roll1','roll2','roll1'], fps: 12, loop: false },
-    land:     { frames: ['land'],                fps: 1,  loop: false, duration: 0.15 },
-    slide:    { frames: ['slide'],               fps: 1,  loop: true  },
-    air_dive: { frames: ['roll1','land'],         fps: 10, loop: false },
-    aim:      { frames: ['aim'],                 fps: 1,  loop: false },
-    fire:     { frames: ['fire','aim'],           fps: 14, loop: false, duration: 0.25 },
-    hurt:     { frames: ['hurt'],                fps: 1,  loop: false, duration: 0.4  },
-    death:    { frames: ['death'],               fps: 1,  loop: false }
+    idle:     { frames: ['hurt'],            fps: 1,  loop: true  },   // standing
+    run:      { frames: ['run2','roll2'],    fps: 9,  loop: true  },   // 2-frame sprint
+    run_alt:  { frames: ['run_alt'],         fps: 10, loop: true  },
+    jump:     { frames: ['roll1'],           fps: 1,  loop: false },   // aerial leap
+    roll:     { frames: ['run_alt'],         fps: 1,  loop: false },   // double-jump dash
+    land:     { frames: ['death'],           fps: 1,  loop: false, duration: 0.18 },
+    slide:    { frames: ['death'],           fps: 1,  loop: true  },   // low crouch (drawn short)
+    air_dive: { frames: ['roll1','death'],   fps: 8,  loop: false },
+    aim:      { frames: ['slide'],           fps: 1,  loop: false },
+    fire:     { frames: ['slide','aim'],     fps: 8,  loop: false, duration: 0.3 }, // raise → fire
+    hurt:     { frames: ['death'],           fps: 1,  loop: false, duration: 0.4  }, // stumble
+    death:    { frames: ['death'],           fps: 1,  loop: false }    // collapse
+  };
+
+  // On-screen display height (px) per pose. The character is rendered with her
+  // feet on the ground line and centred on CHAR_X; normalising height per pose
+  // keeps her a consistent size regardless of how each source frame was cropped,
+  // and keeps crouched poses (slide/land/death) reading as low to the ground.
+  const CHAR_STATE_HEIGHT = {
+    idle: 120, run: 120, run_alt: 118, jump: 116, aim: 122, fire: 122,
+    hurt: 110, land: 100, death: 100, roll: 112, air_dive: 108, slide: 76
   };
 
   // ==================== GAME STATE ====================
@@ -313,6 +374,16 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   let crashFlash = 0;
   let crashMissile = null;
   let crashStarted = false;
+
+  // Landing cinematic state (bridges crash -> planet runner)
+  let landingTime = 0;
+  const LANDING_DURATION = 5.0;
+  let landingPlanetScale = 0;   // planet surface grows from 0->1
+  let landingShipY = -100;      // ship descends from top
+  let landingShipAngle = 0;
+  let landingSmoke = [];
+  let landingDustParticles = [];
+  let landingCameraShake = 0;
 
   // Planet runner state
 
@@ -459,9 +530,9 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight') e.preventDefault();
       // Planet runner controls
       if (gameState === STATE.PLAYING && stage === STAGE.PLANET_RUNNER && !crashStarted) {
-        if (e.code === 'Space' || e.code === 'ArrowUp') { charJump(); e.preventDefault(); }
+        if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { charJump(); e.preventDefault(); }
         if (e.code === 'ArrowDown' || e.code === 'KeyS') { charSlideOrDive(); e.preventDefault(); }
-        if (e.code === 'KeyJ' || e.code === 'KeyZ') { charTap(); e.preventDefault(); }
+        if (e.code === 'KeyJ' || e.code === 'KeyZ' || e.code === 'KeyF') { charShoot(); e.preventDefault(); }
       }
     });
     document.addEventListener('keyup', function(e) { keys[e.code] = false; });
@@ -476,9 +547,9 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
         ship.vy = DRIFT_THRUST; ship.onGround = false; ship.enginePulse = 1;
         if (performance.now() - lastThrustSoundTime > THRUST_SOUND_COOLDOWN * 1000) { playSound('thrust'); lastThrustSoundTime = performance.now(); }
         spawnThrusterParticle(ship.x, ship.y);
-      } else if (stage === STAGE.PLANET_RUNNER) {
-        charJump();
       }
+      // Planet runner: the action is decided on release (touchend) so a tap,
+      // a swipe-up, a swipe-down and a swipe-right map to distinct moves.
     }, { passive: false });
 
     canvas.addEventListener('touchmove', function(e) {
@@ -499,14 +570,8 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
         ship.vy = DRIFT_THRUST; ship.onGround = false; ship.enginePulse = 1;
         if (performance.now() - lastThrustSoundTime > THRUST_SOUND_COOLDOWN * 1000) { playSound('thrust'); lastThrustSoundTime = performance.now(); }
         spawnThrusterParticle(ship.x, ship.y);
-      } else if (stage === STAGE.PLANET_RUNNER && isTap) {
-        // Double-tap to slide, triple-tap to shoot
-        var now = performance.now();
-        if (!char._lastTap || now - char._lastTap > 300) { char._tapCount = 1; }
-        else { char._tapCount++; }
-        char._lastTap = now;
-        if (char._tapCount >= 3) { charTap(); char._tapCount = 0; }
-        else if (char._tapCount === 2) { charSlideOrDive(); char._tapCount = 0; }
+      } else if (stage === STAGE.PLANET_RUNNER) {
+        doPlanetGesture(dx, dy);
       }
       touchShoot = false;
       touchJump = false;
@@ -514,11 +579,31 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     }, { passive: false });
 
     canvas.addEventListener('mousedown', function(e) {
-      e.preventDefault(); initAudio(); handleTouchAction('start');
+      e.preventDefault(); initAudio();
+      mouseStartX = e.clientX; mouseStartY = e.clientY; mouseDown = true;
+      handleTouchAction('start');
     });
     canvas.addEventListener('mouseup', function(e) {
-      e.preventDefault(); handleTouchAction('end');
+      e.preventDefault();
+      if (mouseDown && gameState === STATE.PLAYING && stage === STAGE.PLANET_RUNNER
+          && !transitioning && !crashStarted) {
+        doPlanetGesture(e.clientX - mouseStartX, e.clientY - mouseStartY);
+      }
+      mouseDown = false;
+      handleTouchAction('end');
     });
+  }
+
+  // Planet-runner gesture mapping shared by touch and mouse: tap or swipe-up =
+  // jump, swipe-down = slide/dive, swipe-right = shoot. The dominant axis (and a
+  // small dead-zone) decides which.
+  let mouseStartX = 0, mouseStartY = 0, mouseDown = false;
+  function doPlanetGesture(dx, dy) {
+    var THRESH = 32;
+    if (Math.abs(dy) > Math.abs(dx) && dy < -THRESH) { charJump(); }
+    else if (Math.abs(dy) > Math.abs(dx) && dy > THRESH) { charSlideOrDive(); }
+    else if (Math.abs(dx) > Math.abs(dy) && dx > THRESH) { charShoot(); }
+    else if (Math.abs(dx) < THRESH && Math.abs(dy) < THRESH) { charJump(); }
   }
 
   function handleTouchAction(action) {
@@ -1351,6 +1436,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     planetSpawnTimer = 1.5;
     planetScrollSpeed = PLANET_SCROLL_BASE;
     laserBeams = [];
+    planetStartTime = time;
   }
 
   function spawnPlanetObstacle() {
@@ -1565,10 +1651,14 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     ctx.fillText('VERDANT JUNGLE', W / 2, 24);
     ctx.textAlign = 'right';
     ctx.fillText('\u2665'.repeat(lives), W - 10, 24);
-    if (char.shootReadyTimer > 0) {
-      ctx.fillStyle = '#ffaa00';
-      ctx.textAlign = 'left';
-      ctx.fillText('RAPID FIRE', 10, H - 10);
+    // Brief controls reminder for the first few seconds on the planet.
+    if (time - planetStartTime < 5) {
+      ctx.globalAlpha = Math.max(0, 1 - (time - planetStartTime - 3.5) / 1.5);
+      ctx.fillStyle = '#cfe9ff';
+      ctx.font = '10px Orbitron, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('TAP / \u2191 JUMP   \u2193 SLIDE   \u2192 SHOOT', W / 2, H - 14);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -1649,18 +1739,25 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     nextCreatureTimer = 5 + Math.random() * 8;
   }
 
+  // Standalone sky — shared by the landing cinematic and the planet runner
+  function drawJungleSky() {
+    // Rich layered sky
+    const sg = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+    sg.addColorStop(0,    '#0a1a2a');  // deep space blue-black at top
+    sg.addColorStop(0.25, '#1a3a4a');  // dark teal
+    sg.addColorStop(0.55, '#2a6a3a');  // jungle green mid
+    sg.addColorStop(0.8,  '#6a9a2a');  // warm yellow-green
+    sg.addColorStop(1,    '#9acc44');  // bright horizon
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, 0, W, H * 0.7);
+  }
+
   function drawJungle(dt, time) {
     jungleScroll += 80 * dt;
     const t2 = time;
 
-    // 1. Sky gradient — warm teal-to-amber
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.65);
-    skyGrad.addColorStop(0,   '#1a4a5a');
-    skyGrad.addColorStop(0.4, '#2a6a4a');
-    skyGrad.addColorStop(0.8, '#8aaa44');
-    skyGrad.addColorStop(1,   '#aacc66');
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, W, H * 0.65);
+    // 1. Sky
+    drawJungleSky();
 
     // Two small alien suns
     const sun1x = ((W * 0.7 - jungleScroll * 0.01) % (W + 100) + W + 100) % (W + 100) - 50;
@@ -1671,8 +1768,14 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     // 2. Far mountains (0.15x parallax)
     drawJungleMountains(jungleScroll * 0.15);
 
+    // 2b. Giant alien trees — deep background (0.2x), darker and slower
+    drawJungleDeepBackground(jungleScroll * 0.2);
+
     // 3. Mid trees + alien structures (0.4x)
     drawJungleMidLayer(jungleScroll * 0.4, t2);
+
+    // 3b. Atmospheric haze / rising mist
+    drawJungleHaze(jungleScroll);
 
     // 4. Foreground foliage (0.85x)
     drawJungleForeground(jungleScroll * 0.85, t2);
@@ -1680,8 +1783,96 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     // 5. Ground band
     drawJungleGround();
 
+    // 5b. Bioluminescent mushrooms + spore mist
+    drawBioGlow(jungleScroll * 1.1);
+
     // Atmospheric creatures
     updateAndDrawJungleCreatures(dt, t2);
+  }
+
+  // Atmospheric haze layers — mist rising from the jungle floor
+  function drawJungleHaze(scrollX) {
+    const hazeColors = [
+      'rgba(80,180,100,0.08)',
+      'rgba(120,200,80,0.06)',
+      'rgba(180,220,100,0.05)'
+    ];
+    for (let i = 0; i < 3; i++) {
+      const baseY = H * (0.45 + i * 0.08);
+      const waveOffset = Math.sin(time * 0.3 + i * 2.1) * 8;
+      ctx.fillStyle = hazeColors[i];
+      ctx.beginPath();
+      ctx.moveTo(0, baseY);
+      for (let x = 0; x <= W; x += 20) {
+        const y = baseY + Math.sin(x * 0.02 + scrollX * 0.001 + i) * 12 + waveOffset;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H); ctx.lineTo(0, H);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  // Bioluminescent ground effects — glowing mushrooms + spore mist
+  function drawBioGlow(scrollX) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    const gy = CHAR_GROUND_Y;
+
+    // Glowing mushroom clusters
+    for (let i = 0; i < 6; i++) {
+      const mx = ((i * 160 + 30 - scrollX * 1.1) % (W + 100) + W + 100) % (W + 100) - 50;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 2.5 + i * 1.3);
+      const colors = ['#88ffcc', '#ffaa44', '#aa88ff', '#44ffff'];
+      const col = colors[i % colors.length];
+
+      // Cap
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.7 + 0.3 * pulse;
+      ctx.fillRect(Math.round(mx) - 8, gy - 20, 16, 10);
+      ctx.fillRect(Math.round(mx) - 5, gy - 10, 10, 10);
+      // Glow underneath
+      ctx.globalAlpha = 0.3 * pulse;
+      ctx.fillStyle = col;
+      for (let r = 1; r <= 3; r++) {
+        ctx.fillRect(Math.round(mx) - 8 - r * 2, gy - 20 - r, 16 + r * 4, 10 + r * 2);
+      }
+    }
+
+    // Ground-level spore mist — fast small particles
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < 12; i++) {
+      const px = ((i * 55 + time * 15) % W + W) % W;
+      const py = gy - 5 - Math.sin(time * 1.5 + i) * 8;
+      const sa = 0.15 + 0.1 * Math.sin(time * 3 + i * 2);
+      ctx.fillStyle = `rgba(150,255,120,${sa})`;
+      ctx.fillRect(Math.round(px), Math.round(py), 2, 2);
+    }
+
+    ctx.restore();
+  }
+
+  // Giant alien trees far in the background — dark, slow, majestic
+  function drawJungleDeepBackground(scrollX) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    for (let i = 0; i < 6; i++) {
+      const tx = ((i * 200 + 50 - scrollX) % (W + 300) + W + 300) % (W + 300) - 150;
+      const th = 200 + i * 30;
+      // Massive trunk
+      ctx.fillStyle = 'rgba(15,35,20,0.85)';
+      ctx.fillRect(Math.round(tx) - 15, CHAR_GROUND_Y - th, 30, th);
+      // Canopy — huge dark mass
+      ctx.fillStyle = 'rgba(20,50,25,0.8)';
+      ctx.beginPath();
+      ctx.arc(tx, CHAR_GROUND_Y - th, 70 + i * 10, 0, Math.PI * 2);
+      ctx.fill();
+      // Bioluminescent patches on the canopy
+      const gp = 0.3 + 0.2 * Math.sin(time * 0.8 + i);
+      ctx.fillStyle = `rgba(60,200,80,${gp})`;
+      ctx.fillRect(Math.round(tx) - 10, CHAR_GROUND_Y - th - 20, 20, 15);
+      ctx.fillRect(Math.round(tx) + 20, CHAR_GROUND_Y - th + 10, 15, 10);
+    }
+    ctx.restore();
   }
 
   function drawPixelSun(cx, cy, r, colorOuter, colorInner) {
@@ -2051,18 +2242,32 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   }
 
   function drawCharacter() {
-    if (!spritesLoaded) return;
+    // Guard 1: sprites must be loaded — draw a placeholder so she's always visible
+    if (!spritesLoaded) {
+      ctx.fillStyle = '#ff00ff';
+      ctx.fillRect(CHAR_X - 20, char.y - 120, 40, 120);
+      return;
+    }
+
     const anim = CHAR_ANIMS[char.state];
     if (!anim) return;
-    const frameName = anim.frames[Math.min(char.animFrame, anim.frames.length-1)];
-    const sp = sprites[frameName];
-    if (!sp) return;
+    const frameName = anim.frames[Math.min(char.animFrame, anim.frames.length - 1)];
 
-    const aspect = sp.height / sp.width;
-    const dh = CHAR_DISPLAY_H;
-    const dw = dh / aspect;
+    // Guard 2: resolve the sprite, falling back to a standing/run frame if missing
+    const sp = sprites[frameName] || sprites['hurt'] || sprites['run2'];
+    if (!sp || !sp.width || !sp.height) {
+      // Last-resort fallback so the player can still see the character
+      ctx.fillStyle = '#ff8800';
+      ctx.fillRect(CHAR_X - 20, char.y - 120, 40, 120);
+      return;
+    }
+
+    // Size by pose height, preserve the cropped aspect ratio, and anchor her
+    // feet (the bottom of the cropped sprite) to the ground line at char.y.
+    const dh = CHAR_STATE_HEIGHT[char.state] || 132;
+    const dw = dh * (sp.width / sp.height);
     const dx = CHAR_X - dw * 0.5;
-    const dy = char.y - dh + (char.isSliding ? dh * 0.4 : 0);
+    const dy = char.y - dh;
 
     ctx.save();
     ctx.imageSmoothingEnabled = true;
@@ -2080,16 +2285,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   function updateCharacter(dt) {
     char.stateTimer += dt;
 
-    // Tap timer — if tap sequence stalls too long, reset
-    if (char.tapTimer > 0) {
-      char.tapTimer -= dt;
-      if (char.tapTimer <= 0 && char.tapCount > 0 && char.shootReadyTimer <= 0) {
-        char.tapCount = 0;
-        if (char.state !== 'death') setCharState(char.onGround ? 'run' : 'jump');
-      }
-    }
-    if (char.shootReadyTimer > 0) char.shootReadyTimer -= dt;
-    if (char.shootCooldown > 0)   char.shootCooldown   -= dt;
+    if (char.shootCooldown > 0) char.shootCooldown -= dt;
 
     // Physics
     if (!char.onGround) {
@@ -2155,39 +2351,20 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     }
   }
 
-  function charTap() {
+  // One input = one shot. A short cooldown prevents machine-gun spam but lets
+  // the player fire as fast as they can sensibly tap/swipe.
+  function charShoot() {
     if (char.state === 'death') return;
     if (char.shootCooldown > 0) return;
-
-    if (char.shootReadyTimer > 0) {
-      fireLaserBeam();
-      char.shootReadyTimer = 3.0;
-      char.shootCooldown = 0.15;
-      setCharState('fire');
-      return;
-    }
-
-    char.tapCount++;
-    char.tapTimer = 0.5;
-
-    if (char.tapCount === 1) {
-      setCharState('aim');
-    } else if (char.tapCount === 2) {
-      setCharState('aim');
-    } else if (char.tapCount >= 3) {
-      fireLaserBeam();
-      char.tapCount = 0;
-      char.tapTimer = 0;
-      char.shootReadyTimer = 3.0;
-      char.shootCooldown = 0.15;
-      setCharState('fire');
-    }
+    fireLaserBeam();
+    char.shootCooldown = 0.32;
+    setCharState('fire');
   }
 
   function fireLaserBeam() {
     const beamY = char.isSliding
-      ? char.y - 40
-      : char.y - CHAR_DISPLAY_H * 0.6;
+      ? char.y - 26
+      : char.y - 78;
     laserBeams.push({
       x: CHAR_X + 60,
       y: beamY,
@@ -2494,26 +2671,193 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
     crashFlash *= 0.85;
     for (let i = crashSmoke.length-1; i>=0; i--){ const s=crashSmoke[i]; s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt; if(s.life<=0)crashSmoke.splice(i,1); }
     for (let i = crashSparks.length-1; i>=0; i--){ const s=crashSparks[i]; s.x+=s.vx*dt; s.y+=s.vy*dt; s.vy+=300*dt; s.life-=dt; if(s.life<=0)crashSparks.splice(i,1); }
-    // End → transition to planet runner
+    // End of crash → start landing cinematic
     if (crashTime >= CRASH_DURATION) {
       crashStarted = false;
+      stage = STAGE.LANDING;
+      landingTime = 0;
+      landingShipY = -80;
+      landingShipAngle = 0.3;
+      landingPlanetScale = 0;
+      landingSmoke = [];
+      landingDustParticles = [];
+      landingCameraShake = 0;
+      // Jungle is initialized now so the landing scene can render it
+      initJungle();
+    }
+  }
+
+  function easeInOut(t) {
+    return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+  }
+
+  function updateLanding(dt) {
+    landingTime += dt;
+
+    // Ship descent path
+    if (landingTime < LANDING_DURATION * 0.7) {
+      const descP = landingTime / (LANDING_DURATION * 0.7);
+      landingShipY = -80 + (CHAR_GROUND_Y - 60 - (-80)) * easeInOut(descP);
+      landingShipAngle = 0.3 * (1 - descP); // straightens out
+      // Continuous smoke during descent
+      if (Math.random() < 0.7) {
+        landingSmoke.push({
+          x: W / 2 + (Math.random() - 0.5) * 20,
+          y: landingShipY - 10,
+          vx: (Math.random() - 0.5) * 30,
+          vy: -15 - Math.random() * 20,
+          life: 1.0, max: 1.0,
+          r: 4 + Math.random() * 6
+        });
+      }
+    } else if (landingTime < LANDING_DURATION * 0.75) {
+      // Impact moment
+      landingShipY = CHAR_GROUND_Y - 55;
+      landingShipAngle = 0;
+      if (landingCameraShake < 0.1) {
+        landingCameraShake = 14;
+        // Dust burst
+        for (let i = 0; i < 30; i++) {
+          const a = Math.PI + Math.random() * Math.PI;
+          const s = 60 + Math.random() * 120;
+          landingDustParticles.push({
+            x: W / 2, y: CHAR_GROUND_Y,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40,
+            life: 1.2, max: 1.2
+          });
+        }
+        if (typeof playSound === 'function') { try { playSound('explosion'); } catch (e) {} }
+      }
+    } else {
+      landingShipY = CHAR_GROUND_Y - 55;
+      landingShipAngle = 0;
+    }
+
+    landingCameraShake *= 0.88;
+
+    // Update smoke
+    for (let i = landingSmoke.length - 1; i >= 0; i--) {
+      const s = landingSmoke[i];
+      s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+      if (s.life <= 0) landingSmoke.splice(i, 1);
+    }
+    // Update dust
+    for (let i = landingDustParticles.length - 1; i >= 0; i--) {
+      const d = landingDustParticles[i];
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      d.vy += 180 * dt; d.life -= dt;
+      if (d.life <= 0) landingDustParticles.splice(i, 1);
+    }
+
+    // End landing → start planet runner
+    if (landingTime >= LANDING_DURATION) {
       stage = STAGE.PLANET_RUNNER;
       initJungle();
       initPlanetRunner();
       char.y = CHAR_GROUND_Y;
-      char.vy = 0;
-      char.onGround = true;
-      char.jumpsUsed = 0;
-      char.isSliding = false;
-      charInvincible = 0;
-      setCharState('idle');
-      // Brief pause then start playing
-      setTimeout(() => {
-        if (stage === STAGE.PLANET_RUNNER && gameState === STATE.PLAYING) {
-          setCharState('run');
-        }
-      }, 500);
+      char.vy = 0; char.onGround = true;
+      char.jumpsUsed = 0; char.isSliding = false;
+      charInvincible = 2.0;
+      setCharState('run');
     }
+  }
+
+  function renderLanding() {
+    ctx.save();
+    const sx = (Math.random() - 0.5) * landingCameraShake;
+    const sy = (Math.random() - 0.5) * landingCameraShake;
+    ctx.translate(sx, sy);
+
+    // Jungle sky + far mountains as backdrop
+    drawJungleSky();
+    drawJungleMountains(landingTime * 20);
+
+    // Planet surface rises from bottom as ship descends
+    const surfaceP = Math.min(1, landingTime / (LANDING_DURATION * 0.5));
+    const surfaceY = H - (H * 0.35 * surfaceP);
+    const surfGrad = ctx.createLinearGradient(0, surfaceY, 0, H);
+    surfGrad.addColorStop(0, '#3a7a2a');
+    surfGrad.addColorStop(0.3, '#2a5a1a');
+    surfGrad.addColorStop(1, '#1a3a0a');
+    ctx.fillStyle = surfGrad;
+    ctx.fillRect(0, surfaceY, W, H - surfaceY);
+
+    // Ground texture on surface
+    if (surfaceP > 0.3) {
+      ctx.imageSmoothingEnabled = false;
+      for (let x = 0; x < W; x += 6) {
+        const sh = 30 + Math.floor(Math.sin(x * 0.3 + landingTime) * 8);
+        ctx.fillStyle = `rgb(${30 + sh % 10},${sh + 30},${15 + sh % 5})`;
+        ctx.fillRect(x, Math.round(surfaceY), 5, 4);
+      }
+    }
+
+    // Tree silhouettes appearing as surface rises
+    if (surfaceP > 0.5) {
+      ctx.fillStyle = 'rgba(20,50,15,0.8)';
+      for (let i = 0; i < 8; i++) {
+        const tx = (i * 70 + 20) % W;
+        const th = 40 + Math.sin(i * 2.3) * 20;
+        ctx.fillRect(tx - 8, surfaceY - th, 16, th);
+        ctx.fillRect(tx - 20, surfaceY - th * 0.6, 40, th * 0.5);
+      }
+    }
+
+    // Speed lines in upper area (falling sensation)
+    if (landingTime < LANDING_DURATION * 0.7) {
+      ctx.strokeStyle = 'rgba(200,220,255,0.2)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 12; i++) {
+        const lx = (i * 45 + landingTime * 80) % W;
+        const len = 20 + Math.random() * 40;
+        ctx.beginPath();
+        ctx.moveTo(lx, 0);
+        ctx.lineTo(lx + 5, len);
+        ctx.stroke();
+      }
+    }
+
+    // Smoke particles
+    ctx.imageSmoothingEnabled = false;
+    for (const s of landingSmoke) {
+      const a = s.life / s.max;
+      ctx.fillStyle = `rgba(80,80,90,${a * 0.6})`;
+      ctx.fillRect(Math.round(s.x - s.r), Math.round(s.y - s.r), s.r * 2, s.r * 2);
+    }
+
+    // The ship — drawn large (she was inside it)
+    const shipScale = 2.2;
+    ctx.save();
+    ctx.translate(Math.round(W / 2), Math.round(landingShipY));
+    ctx.rotate(landingShipAngle);
+    ctx.scale(shipScale, shipScale);
+    drawShip(0, 0, 0, 1, false);
+    ctx.restore();
+
+    // Dust particles after landing
+    for (const d of landingDustParticles) {
+      const a = d.life / d.max;
+      ctx.fillStyle = `rgba(180,160,100,${a * 0.7})`;
+      ctx.fillRect(Math.round(d.x), Math.round(d.y), 3, 3);
+    }
+
+    // "PLANET: VERDANT" title fading in during last ~1.5s
+    const titleP = Math.max(0, (landingTime - LANDING_DURATION * 0.7) / (LANDING_DURATION * 0.3));
+    if (titleP > 0) {
+      ctx.globalAlpha = Math.min(1, titleP * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, H / 2 - 30, W, 50);
+      ctx.fillStyle = '#88ffaa';
+      ctx.font = 'bold 18px Orbitron, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('PLANET: VERDANT', W / 2, H / 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = '11px Orbitron, monospace';
+      ctx.fillText('PREPARE FOR COMBAT', W / 2, H / 2 + 20);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
   }
 
   function renderCrash() {
@@ -2593,7 +2937,7 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
   // ==================== PHASE TRANSITION ====================
   function updateStageTransition(dt) {
     stageTimer += dt;
-    // Check if 60s has elapsed — trigger crash sequence
+    // Check if the space-runner duration has elapsed — trigger crash sequence
     if (stage === STAGE.SPACE_RUNNER && stageTimer >= SPACE_RUNNER_DURATION && !crashStarted) {
       startCrash();
     }
@@ -2678,6 +3022,10 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
       updateStageTransition(dt);
       return;
     }
+    if (stage === STAGE.LANDING) {
+      updateLanding(dt);
+      return;
+    }
     if (stage === STAGE.SPACE_RUNNER) {
       updateDrift(dt);
     } else if (stage === STAGE.PLANET_RUNNER) {
@@ -2708,6 +3056,8 @@ canvas { display:block; touch-action:none; -webkit-tap-highlight-color:transpare
         renderCrash();
       } else if (transitioning && transitionPhase === 'CRASH_CINEMATIC') {
         // Transition active — freeze frame
+      } else if (stage === STAGE.LANDING) {
+        renderLanding();
       } else if (stage === STAGE.PLANET_RUNNER) {
         drawJungle(dt, time);
         drawPlanetObstacles(time);
